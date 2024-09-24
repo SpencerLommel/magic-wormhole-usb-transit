@@ -585,16 +585,35 @@ class Common:
             return ([], None)
         portnum = allocate_tcp_port()
         addresses = ipaddrs.find_addresses()
-        non_loopback_addresses = [a for a in addresses if a != "127.0.0.1"]
-        if non_loopback_addresses:
-            # some test hosts, including the appveyor VMs, *only* have
-            # 127.0.0.1, and the tests will hang badly if we remove it.
-            addresses = non_loopback_addresses
-        direct_hints = [
-            DirectTCPV1Hint(str(addr), portnum, 0.0) for addr in addresses
-        ]
+
+        # Added logic to detect and prioritize USB-C interface
+        usb_interface = 'usb0'  # Assuming usb0 is the USB-C network interface
+        usb_address = None
+
+        for addr in addresses:
+            if usb_interface in addr:  # Check if the USB-C interface is available
+                usb_address = addr
+                break
+
+        if usb_address:
+            # If a USB-C interface is detected, prioritize it
+            print("USB-C interface detected:", usb_address)
+            direct_hints = [
+                DirectTCPV1Hint(str(usb_address), portnum, 0.0)
+            ]
+        else:
+            non_loopback_addresses = [a for a in addresses if a != "127.0.0.1"]
+            if non_loopback_addresses:
+                # some test hosts, including the appveyor VMs, *only* have
+                # 127.0.0.1, and the tests will hang badly if we remove it.
+                addresses = non_loopback_addresses
+            direct_hints = [
+                DirectTCPV1Hint(str(addr), portnum, 0.0) for addr in addresses
+            ]
+
         ep = endpoints.serverFromString(self._reactor, "tcp:%d" % portnum)
         return direct_hints, ep
+
 
     def get_connection_abilities(self):
         return [
@@ -610,13 +629,35 @@ class Common:
     def get_connection_hints(self):
         hints = []
         direct_hints = yield self._get_direct_hints()
+
+        # Added logic to detect and prioritize USB-C interface
+        usb_interface = 'usb0'  # Assuming usb0 is the USB-C network interface
+        usb_hints = None
+
         for dh in direct_hints:
+            if dh.hostname == usb_interface:  # Check if USB-C interface is in direct hints
+                usb_hints = dh
+                break
+
+        if usb_hints:
+            # If USB-C interface is detected, prioritize it
             hints.append({
                 u"type": u"direct-tcp-v1",
-                u"priority": dh.priority,
-                u"hostname": dh.hostname,
-                u"port": dh.port,  # integer
+                u"priority": usb_hints.priority,
+                u"hostname": usb_hints.hostname,
+                u"port": usb_hints.port,  # integer
             })
+        else:
+            # Fallback to standard direct hints if no USB-C interface found
+            for dh in direct_hints:
+                hints.append({
+                    u"type": u"direct-tcp-v1",
+                    u"priority": dh.priority,
+                    u"hostname": dh.hostname,
+                    u"port": dh.port,  # integer
+                })
+
+        # Now add relay hints to the list of connection hints
         for relay in self._transit_relays:
             rhint = {u"type": u"relay-v1", u"hints": []}
             for rh in relay.hints:
@@ -627,11 +668,14 @@ class Common:
                     u"port": rh.port
                 })
             hints.append(rhint)
+
         returnValue(hints)
+
 
     def _get_direct_hints(self):
         if self._listener:
             return defer.succeed(self._my_direct_hints)
+
         # there is a slight race here: if someone calls get_direct_hints() a
         # second time, before the listener has actually started listening,
         # then they'll get a Deferred that fires (with the hints) before the
@@ -640,8 +684,24 @@ class Common:
         # protocol getting the connection hints to the other end, and 2: the
         # listener being ready for connections, and I'm confident that the
         # listener will win.
+
+        # Build listener and get the direct hints
         self._my_direct_hints, self._listener = self._build_listener()
 
+        # Added logic to detect and prioritize USB-C interface
+        usb_interface = 'usb0'  # Assuming usb0 is the USB-C network interface
+        usb_hints = None
+
+        # Check if USB-C interface is available in direct hints
+        for dh in self._my_direct_hints:
+            if usb_interface in dh.hostname:
+                usb_hints = dh
+                break
+
+        if usb_hints:
+            return defer.succeed([usb_hints])  # Return USB-C hint if available
+
+        # Fallback to the original logic if USB-C is not detected
         if self._listener is None:  # don't listen
             self._listener_d = None
             return defer.succeed(self._my_direct_hints)  # empty
@@ -665,6 +725,7 @@ class Common:
 
         d.addCallback(_listening)
         return d
+
 
     def _stop_listening(self):
         # this is for unit tests. The usual control flow (via connect())
